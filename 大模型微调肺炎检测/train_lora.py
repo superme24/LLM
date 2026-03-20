@@ -219,6 +219,25 @@ def main():
     # ============================================================
     # 第6步: 定义数据整理函数 (collate_fn)
     # ============================================================
+    from qwen_vl_utils import process_vision_info
+
+    # 获取 assistant 回复的起始标记 ID，用于定位 labels 边界
+    # Qwen2-VL 的 assistant 回复以 <|im_start|>assistant\n 开头
+    _assistant_header = "<|im_start|>assistant\n"
+    _assistant_header_ids = processor.tokenizer.encode(
+        _assistant_header, add_special_tokens=False
+    )
+    _im_end_id = processor.tokenizer.convert_tokens_to_ids("<|im_end|>")
+
+    def _find_sublist(seq, sublist):
+        """在列表 seq 中查找子列表 sublist 最后一次出现的起始位置，未找到返回 -1。"""
+        n, m = len(seq), len(sublist)
+        last_pos = -1
+        for i in range(n - m + 1):
+            if seq[i : i + m] == sublist:
+                last_pos = i
+        return last_pos
+
     def collate_fn(examples):
         """
         数据整理函数: 将一个 batch 的对话数据转换为模型输入。
@@ -226,14 +245,15 @@ def main():
         对于 Qwen-VL 模型，需要特殊处理:
           1. 使用 processor.apply_chat_template 将对话转为文本
           2. 使用 processor 同时处理文本和图像
-          3. 构造 labels (仅对 assistant 回复计算损失)
+          3. 构造 labels: 仅对 assistant 回复部分计算损失，
+             system / user 部分及 padding 全部设为 -100
         """
         texts = []
-        images_list = []
+        all_images = []
 
         for example in examples:
             messages = example["messages"]
-            # 将对话转为文本
+            # 将对话转为文本（包含所有特殊 token）
             text = processor.apply_chat_template(
                 messages,
                 tokenize=False,
@@ -241,22 +261,8 @@ def main():
             )
             texts.append(text)
 
-            # 提取图像路径
-            images = []
-            for msg in messages:
-                if isinstance(msg.get("content"), list):
-                    for item in msg["content"]:
-                        if item.get("type") == "image":
-                            images.append(item["image"])
-            images_list.append(images)
-
-        # 使用 processor 处理文本+图像
-        from qwen_vl_utils import process_vision_info
-
-        # 为每个样本提取视觉信息
-        all_images = []
-        for msgs_example in examples:
-            img_inputs, _ = process_vision_info(msgs_example["messages"])
+            # 提取视觉信息（PIL Image 列表）
+            img_inputs, _ = process_vision_info(messages)
             if img_inputs:
                 all_images.extend(img_inputs)
 
@@ -267,13 +273,31 @@ def main():
             return_tensors="pt",
         )
 
-        # 构造 labels: 将非 assistant 部分的 token 设为 -100 (不计算损失)
+        # 构造 labels: 将非 assistant 回复部分的 token 设为 -100
+        # 逐条序列定位 assistant 回复的起始位置
         labels = batch["input_ids"].clone()
-        # 找到 assistant 回复的边界并只保留这部分的 labels
-        # 简化处理: 使用 padding token 掩码
-        labels[labels == processor.tokenizer.pad_token_id] = -100
-        batch["labels"] = labels
+        for i, input_ids_row in enumerate(labels):
+            ids_list = input_ids_row.tolist()
 
+            # 先将全部 token 掩码（不计算损失）
+            labels[i, :] = -100
+
+            # 找到最后一个 assistant header 的位置
+            assistant_start = _find_sublist(ids_list, _assistant_header_ids)
+            if assistant_start == -1:
+                # 降级处理: 找不到 header 时保留全部 token 的损失
+                labels[i] = input_ids_row.clone()
+                labels[i][input_ids_row == processor.tokenizer.pad_token_id] = -100
+                continue
+
+            # assistant header 之后才计算损失（跳过 header 本身）
+            reply_start = assistant_start + len(_assistant_header_ids)
+            labels[i, reply_start:] = input_ids_row[reply_start:].clone()
+
+            # 还原 padding 位置为 -100
+            labels[i][input_ids_row == processor.tokenizer.pad_token_id] = -100
+
+        batch["labels"] = labels
         return batch
 
     # ============================================================

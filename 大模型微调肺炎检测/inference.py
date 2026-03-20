@@ -144,6 +144,9 @@ def extract_prediction(response_text):
     """
     从模型回复中提取分类预测标签。
 
+    优先匹配训练时使用的诊断报告关键词，支持中英文。
+    采用加权评分：明确的诊断结论词权重高于泛化词汇。
+
     参数:
         response_text: 模型生成的文本
 
@@ -151,9 +154,25 @@ def extract_prediction(response_text):
         str: "positive" 或 "negative"
     """
     text = response_text.lower()
-    # 检查关键词
-    positive_keywords = ["阳性", "新冠肺炎", "covid", "positive", "磨玻璃影", "实变"]
-    negative_keywords = ["阴性", "正常", "normal", "negative", "未见"]
+
+    # 高权重：明确的诊断结论词（来自训练时的 POSITIVE/NEGATIVE_RESPONSE 模板）
+    strong_positive = ["covid-19 阳性", "新冠肺炎阳性", "新冠肺炎 (covid-19) 阳性",
+                       "诊断结论：新冠肺炎", "诊断结论:新冠肺炎"]
+    strong_negative = ["covid-19 阴性", "正常 (covid-19 阴性)", "covid-19) 阴性",
+                       "诊断结论：正常", "诊断结论:正常",
+                       "未见明显磨玻璃影", "未见新冠肺炎相关"]
+
+    for kw in strong_positive:
+        if kw in text:
+            return "positive"
+    for kw in strong_negative:
+        if kw in text:
+            return "negative"
+
+    # 普通权重关键词
+    positive_keywords = ["阳性", "新冠肺炎", "covid", "positive",
+                         "磨玻璃影", "实变影", "病毒性肺炎"]
+    negative_keywords = ["阴性", "正常", "normal", "negative", "未见", "healthy"]
 
     pos_score = sum(1 for kw in positive_keywords if kw in text)
     neg_score = sum(1 for kw in negative_keywords if kw in text)
@@ -163,13 +182,16 @@ def extract_prediction(response_text):
     elif neg_score > pos_score:
         return "negative"
     else:
-        # 默认返回 positive 作为保守估计
-        return "positive"
+        # 无法确定时默认 negative（减少误报，提升特异度）
+        return "negative"
 
 
 def batch_predict(model, processor, test_json_path, output_path=None):
     """
     批量推理测试集。
+
+    使用与训练时相同的 DIAGNOSIS_PROMPT，以保证分布一致性，
+    再从详细诊断报告中提取分类标签。
 
     参数:
         model:           已加载的模型
@@ -202,18 +224,16 @@ def batch_predict(model, processor, test_json_path, output_path=None):
         # 提取本地路径
         image_path = image_url.replace("file://", "").replace("/", os.sep)
 
-        # 从 assistant 回复中提取真实标签
+        # 从 assistant 回复中提取真实标签（使用 extract_prediction 保持一致）
         true_label = None
         for msg in sample["messages"]:
             if msg["role"] == "assistant":
-                text = msg["content"]
-                if "阳性" in text:
-                    true_label = "positive"
-                else:
-                    true_label = "negative"
+                true_label = extract_prediction(msg["content"])
 
-        # 推理
-        response = predict_single(model, processor, image_path)
+        # 使用与训练一致的 DIAGNOSIS_PROMPT 推理，再提取标签
+        response = predict_single(
+            model, processor, image_path, prompt=config.DIAGNOSIS_PROMPT
+        )
         pred_label = extract_prediction(response)
 
         results.append({
