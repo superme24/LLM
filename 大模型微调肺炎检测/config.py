@@ -70,8 +70,8 @@ LORA_TARGET_MODULES = [   # 应用 LoRA 的目标模块
 NUM_EPOCHS = 3
 BATCH_SIZE = 1                   # 6GB 显存建议 batch=1
 GRADIENT_ACCUMULATION_STEPS = 16 # 等效 batch = 1 × 16 = 16
-LEARNING_RATE = 1e-4
-WARMUP_RATIO = 0.03
+LEARNING_RATE = 2e-4             # 适当提高学习率，加快收敛
+WARMUP_RATIO = 0.05              # 更长的 warmup，稳定早期训练
 MAX_SEQ_LENGTH = 1024            # 6GB 显存下适当缩短
 WEIGHT_DECAY = 0.01
 LR_SCHEDULER_TYPE = "cosine"
@@ -86,7 +86,8 @@ DATALOADER_NUM_WORKERS = 0 if os.name == "nt" else 4
 IMAGE_SIZE = 448
 SEED = 42
 # 由于完整数据集 ~8.5 万张，VLM 微调时可采样子集加速训练
-MAX_TRAIN_SAMPLES = 2000        # 训练采样数 (设为 None 使用全部)
+# 增大训练样本量以提升准确率和召回率（目标 ≥ 80%）
+MAX_TRAIN_SAMPLES = 3000        # 训练采样数 (设为 None 使用全部)
 MAX_VAL_SAMPLES = 500           # 验证采样数
 MAX_TEST_SAMPLES = 500          # 测试采样数
 
